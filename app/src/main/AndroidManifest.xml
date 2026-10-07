@@ -19,6 +19,10 @@
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Pause listening during phone calls so we never glitch call audio -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- v2.2: lets the app ask to be exempt from battery optimization so Samsung
+         never dozes the always-on mic service. Sideloaded personal app, so no
+         Play-policy concern. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Restart listening after a reboot if it was enabled -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
