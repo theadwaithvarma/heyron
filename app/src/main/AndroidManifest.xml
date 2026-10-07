@@ -12,6 +12,11 @@
          Works with just the manifest entry because we target API 33
          (Android 14+ gates this behind a Settings toggle for targetSdk 34+). -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- v2.1: "Display over other apps" — grants the background-activity-start
+         exemption, so the service can launch the voice assistant directly on
+         wake (instant, DND-proof). Without it we fall back to the full-screen
+         notification. User-granted once in Settings; requested from MainActivity. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Pause listening during phone calls so we never glitch call audio -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <!-- Restart listening after a reboot if it was enabled -->
