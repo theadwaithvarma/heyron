@@ -26,9 +26,10 @@ import android.telephony.TelephonyManager
  * - openWakeWord does on-device keyword spotting (melspectrogram + speech-embedding
  *   + wake-word ONNX models); no audio ever leaves the phone, no API key needed.
  * - On detection (v2.1): if "Display over other apps" is granted, the service
- *   launches ACTION_VOICE_COMMAND directly (instant, DND-proof); otherwise it
- *   posts a HIGH-priority notification with a full-screen intent. Either way
- *   the default assistant (Muse) opens with voice input already toggled.
+ *   launches the assistant directly (instant, DND-proof); otherwise it posts
+ *   a HIGH-priority notification with a full-screen intent. v2.3: the launch
+ *   tries ACTION_ASSIST first (Muse's channel — it ignores ACTION_VOICE_COMMAND)
+ *   then falls back to ACTION_VOICE_COMMAND.
  * - Pauses while a phone call is active (a second mic holder can glitch call audio).
  */
 class WakeService : Service() {
@@ -180,12 +181,15 @@ class WakeService : Service() {
             engine?.stop()
         } catch (_: Exception) { }
 
-        // Implicit intent -> the system's default digital assistant (Muse on
-        // Adwaith's phone). The default must be set; otherwise Android shows a
-        // picker. (An explicit setPackage() would need a per-app picker UI in
-        // Hey Ron itself — skipped; the OS default already resolves correctly.)
-        val voiceIntent = Intent(Intent.ACTION_VOICE_COMMAND)
-            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        // v2.3: Muse does NOT handle ACTION_VOICE_COMMAND (that's why the
+        // picker only ever offered Google/Perplexity). It implements the
+        // assist entry point (ACTION_ASSIST, the long-press-home channel),
+        // which opens it already listening. Try assist first, fall back to
+        // the legacy voice-command channel.
+        val intents = listOf(
+            Intent(Intent.ACTION_ASSIST).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            Intent(Intent.ACTION_VOICE_COMMAND).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
 
         // v2.1 primary path: SYSTEM_ALERT_WINDOW ("Display over other apps")
         // exempts the service from background-activity-start restrictions, so
@@ -193,11 +197,14 @@ class WakeService : Service() {
         // for DND or Samsung's heads-up demotion to swallow.
         var launched = false
         if (Settings.canDrawOverlays(this)) {
-            try {
-                startActivity(voiceIntent)
-                launched = true
-            } catch (_: Exception) {
-                launched = false
+            for (intent in intents) {
+                try {
+                    startActivity(intent)
+                    launched = true
+                    break
+                } catch (_: Exception) {
+                    // Try the next channel.
+                }
             }
         }
         if (launched) {
@@ -205,8 +212,9 @@ class WakeService : Service() {
         } else {
             // Fallback: full-screen notification (today's behavior; works when
             // DND is off and the OEM fires full-screen intents). Tap always works.
+            // The tap uses the assist channel — the one Muse actually implements.
             val pending = PendingIntent.getActivity(
-                this, 0, voiceIntent,
+                this, 0, intents[0],
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val notification = Notification.Builder(this, CHANNEL_WAKE)
