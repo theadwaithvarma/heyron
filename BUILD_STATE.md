@@ -163,3 +163,19 @@ sideloaded personal app that must pop Muse open from the lock screen.
   trigger exists, but THEN can only open an app (Muse's main screen, not voice
   mode). The overlay path fires the real voice intent with zero manual setup.
 - Version: 2.1, versionCode 201 (CI maps tag vX.Y -> X*100+Y).
+
+## v2.2 (2026-10-07, 23:35 IST) — "make like" the reference project
+- Adwaith rejected v2.1's permission-dance framing; asked to match similar
+  projects. Studied kangrio/assistant (offline hotword + launch AI assistant):
+  it uses NO full-screen intent in the wake path — just SYSTEM_ALERT_WINDOW +
+  direct startActivity(), i.e. exactly v2.1's mechanism. So v2.1 stays; v2.2
+  adds the rest of their pattern:
+  - REQUEST_IGNORE_BATTERY_OPTIMIZATIONS + checklist row/button firing the
+    system "always run in background" dialog (Samsung dozes mic services).
+  - Wake "ding" via ToneGenerator on successful direct launch.
+  - Considered their setPackage() explicit targeting, but RoleManager has no
+    public getRoleHolders() (verified against android-34/35 jars — only
+    isRoleHeld/isRoleAvailable/createRequestRoleIntent exist); they get the
+    package from their own onboarding picker. Skipped — the implicit intent
+    already resolves to the user-set default.
+- Version: 2.2, versionCode 202.
