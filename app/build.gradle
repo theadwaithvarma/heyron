@@ -17,8 +17,8 @@ android {
         targetSdk 33
         // CI passes -PappVersionCode / -PappVersionName from the release tag
         // (vX.Y -> code X*100+Y). Local builds fall back to the values below.
-        versionCode (project.findProperty('appVersionCode')?.toInteger() ?: 203)
-        versionName project.findProperty('appVersionName') ?: '2.3'
+        versionCode (project.findProperty('appVersionCode')?.toInteger() ?: 204)
+        versionName project.findProperty('appVersionName') ?: '2.4'
 
         // Keep the APK lean: onnxruntime's AAR ships native libs for 4 ABIs
         // (~33 MB per ABI); the M12 is arm64-v8a, so ship that only.
