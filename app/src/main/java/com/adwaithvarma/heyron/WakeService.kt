@@ -15,9 +15,13 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Always-on "Hey Ron" listener.
@@ -25,12 +29,27 @@ import android.telephony.TelephonyManager
  * - Runs as a foreground service (type: microphone) with a persistent notification.
  * - openWakeWord does on-device keyword spotting (melspectrogram + speech-embedding
  *   + wake-word ONNX models); no audio ever leaves the phone, no API key needed.
- * - On detection (v2.1): if "Display over other apps" is granted, the service
- *   launches the assistant directly (instant, DND-proof); otherwise it posts
- *   a HIGH-priority notification with a full-screen intent. v2.3: the launch
- *   tries ACTION_ASSIST first (Muse's channel — it ignores ACTION_VOICE_COMMAND)
- *   then falls back to ACTION_VOICE_COMMAND.
- * - Pauses while a phone call is active (a second mic holder can glitch call audio).
+ *
+ * v2.4 wake pipeline (per ALGORITHM_VNEXT.md):
+ *  1. engine.stop() synchronously — mic released before Muse can acquire it
+ *  2. playDing() immediately — "I heard you" feedback, independent of launch success
+ *  3. Direct launch (primary): if "Display over other apps" is granted,
+ *     startActivity(ACTION_ASSIST), fall back to ACTION_VOICE_COMMAND on exception.
+ *     Instant, DND-proof, works while the phone is in active use.
+ *  4. Full-screen notification (secondary): HIGH channel, CATEGORY_ALARM,
+ *     full-screen intent on the assist channel; tap goes through WakeTapReceiver
+ *     so the wake-path log records TAP too.
+ *  5. 3 s debounce after any launch attempt.
+ *  6. Mic re-arm at 4 s with exponential backoff (1/2/4/8 s); on persistent
+ *     failure the engine is marked DEGRADED (visible in UI) instead of dying
+ *     silently.
+ *  7. Every wake is logged (timestamp, path, defeat detail) → diagnostics UI.
+ *
+ * Muse note: Muse implements the assist entry point (ACTION_ASSIST, the
+ * long-press-home channel) and ignores ACTION_VOICE_COMMAND — the assist
+ * intent is first for a reason.
+ *
+ * Pauses while a phone call is active (a second mic holder can glitch call audio).
  */
 class WakeService : Service() {
 
@@ -42,23 +61,82 @@ class WakeService : Service() {
         const val KEY_THRESHOLD = "detection_threshold"
         const val DEFAULT_THRESHOLD = 0.5f   // openWakeWord's recommended value
 
-        private const val CHANNEL_LISTEN = "heyron_listening"
-        private const val CHANNEL_WAKE = "heyron_wake"
+        const val CHANNEL_LISTEN = "heyron_listening"
+        const val CHANNEL_WAKE = "heyron_wake"
         private const val NOTIF_LISTEN_ID = 1
         private const val NOTIF_WAKE_ID = 2
         private const val ASSET_CUSTOM_MODEL = "hey_ron.onnx"
         private const val ASSET_FALLBACK_MODEL = "hey_jarvis_v0.1.onnx"
+
+        // Wake-path log + engine-state diagnostics (read by MainActivity).
+        private const val KEY_LAST_WAKE_TS = "last_wake_ts"
+        private const val KEY_LAST_WAKE_PATH = "last_wake_path"
+        private const val KEY_LAST_WAKE_DETAIL = "last_wake_detail"
+        private const val KEY_ENGINE_DEGRADED = "engine_degraded"
+        private const val KEY_ENGINE_RETRIES = "engine_retries"
+        private const val KEY_PAUSED_FOR_CALL = "paused_for_call"
 
         fun isEnabled(ctx: Context): Boolean =
             ctx.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_ENABLED, false)
 
         fun getThreshold(ctx: Context): Float =
             ctx.getSharedPreferences(PREFS, MODE_PRIVATE).getFloat(KEY_THRESHOLD, DEFAULT_THRESHOLD)
+
+        fun isWakeChannelHigh(ctx: Context): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+            val nm = ctx.getSystemService(NotificationManager::class.java)
+            val ch = nm.getNotificationChannel(CHANNEL_WAKE) ?: return false
+            return ch.importance >= NotificationManager.IMPORTANCE_HIGH
+        }
+
+        /** "None set" when no default assistant is configured. */
+        fun defaultAssistantLabel(ctx: Context): String? {
+            val flat = Settings.Secure.getString(ctx.contentResolver, "assistant")
+                ?: return null
+            if (flat.isBlank()) return null
+            val cn = android.content.ComponentName.unflattenFromString(flat)
+                ?: return null
+            return try {
+                ctx.packageManager.getApplicationLabel(
+                    ctx.packageManager.getApplicationInfo(cn.packageName, 0)
+                ).toString()
+            } catch (_: Exception) {
+                cn.packageName
+            }
+        }
+
+        fun logWake(ctx: Context, path: String, detail: String) {
+            ctx.getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putLong(KEY_LAST_WAKE_TS, System.currentTimeMillis())
+                .putString(KEY_LAST_WAKE_PATH, path)
+                .putString(KEY_LAST_WAKE_DETAIL, detail.take(160))
+                .apply()
+        }
+
+        fun lastWakeSummary(ctx: Context): String {
+            val prefs = ctx.getSharedPreferences(PREFS, MODE_PRIVATE)
+            val ts = prefs.getLong(KEY_LAST_WAKE_TS, 0)
+            if (ts == 0L) return "No wake word detected yet"
+            val time = SimpleDateFormat("HH:mm:ss, d MMM", Locale.getDefault()).format(Date(ts))
+            val path = prefs.getString(KEY_LAST_WAKE_PATH, "?") ?: "?"
+            val detail = prefs.getString(KEY_LAST_WAKE_DETAIL, "") ?: ""
+            return "Last wake $time — path: $path" + if (detail.isNotBlank()) "\n$detail" else ""
+        }
+
+        fun isDegraded(ctx: Context): Boolean =
+            ctx.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_ENGINE_DEGRADED, false)
+
+        fun degradedRetries(ctx: Context): Int =
+            ctx.getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_ENGINE_RETRIES, 0)
+
+        fun isPausedForCall(ctx: Context): Boolean =
+            ctx.getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_PAUSED_FOR_CALL, false)
     }
 
     private var engine: WakeWordEngine? = null
     private var listening = false
     private var pausedForCall = false
+    private var lastLaunchAttemptMs = 0L
     private lateinit var notificationManager: NotificationManager
     private lateinit var telephonyManager: TelephonyManager
 
@@ -132,8 +210,9 @@ class WakeService : Service() {
             eng.start()
             engine = eng
             listening = true
+            setPausedForCall(false)
             setEnabled(true)
-            promoteToForeground(listeningNotification(paused = false))
+            promoteToForeground(listeningNotification())
         } catch (e: Exception) {
             promoteToForeground(errorNotification(e.message ?: "Engine failed to start"))
             setEnabled(false)
@@ -149,6 +228,8 @@ class WakeService : Service() {
         engine?.release()
         engine = null
         setEnabled(false)
+        setPausedForCall(false)
+        setDegraded(false, 0)
         stopForeground(STOP_FOREGROUND_REMOVE)
         notificationManager.cancel(NOTIF_WAKE_ID)
     }
@@ -156,65 +237,79 @@ class WakeService : Service() {
     private fun pauseForCall() {
         if (!listening || pausedForCall) return
         pausedForCall = true
+        setPausedForCall(true)
         try {
             engine?.stop()
         } catch (_: Exception) { }
-        notificationManager.notify(NOTIF_LISTEN_ID, listeningNotification(paused = true))
+        notificationManager.notify(NOTIF_LISTEN_ID, listeningNotification())
     }
 
     private fun resumeAfterCall() {
         if (!listening || !pausedForCall) return
         pausedForCall = false
+        setPausedForCall(false)
         try {
             engine?.start()
-        } catch (_: Exception) { }
-        notificationManager.notify(NOTIF_LISTEN_ID, listeningNotification(paused = false))
+            setDegraded(false, 0)
+        } catch (_: Exception) {
+            // Mic didn't come back — enter the same backoff path as a wake re-arm.
+            scheduleRearm()
+        }
+        notificationManager.notify(NOTIF_LISTEN_ID, listeningNotification())
     }
 
     // ---------- wake ----------
 
     /** Runs on the engine's audio thread when the keyword is spotted. */
     private fun onWakeWord() {
-        // Briefly stop so the assistant's own mic use doesn't re-trigger us;
-        // the service keeps running and resumes listening below.
+        // 3 s debounce: a repeated "hey jarvis" during launch must not stack.
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLaunchAttemptMs < 3000) return
+        lastLaunchAttemptMs = now
+
+        // 1. Release the mic synchronously, BEFORE Muse can try to acquire it.
         try {
             engine?.stop()
         } catch (_: Exception) { }
 
-        // v2.3: Muse does NOT handle ACTION_VOICE_COMMAND (that's why the
-        // picker only ever offered Google/Perplexity). It implements the
-        // assist entry point (ACTION_ASSIST, the long-press-home channel),
-        // which opens it already listening. Try assist first, fall back to
-        // the legacy voice-command channel.
+        // 2. Immediate "I heard you" feedback — independent of launch success.
+        playDing()
+
+        // 3. Direct launch (primary): SYSTEM_ALERT_WINDOW exempts us from
+        // background-activity-start restrictions, so the assistant opens
+        // instantly and directly — DND-proof, works while the phone is in use.
         val intents = listOf(
             Intent(Intent.ACTION_ASSIST).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
             Intent(Intent.ACTION_VOICE_COMMAND).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         )
-
-        // v2.1 primary path: SYSTEM_ALERT_WINDOW ("Display over other apps")
-        // exempts the service from background-activity-start restrictions, so
-        // the assistant opens instantly and directly — no full-screen intent
-        // for DND or Samsung's heads-up demotion to swallow.
         var launched = false
+        var detail = ""
         if (Settings.canDrawOverlays(this)) {
             for (intent in intents) {
                 try {
                     startActivity(intent)
                     launched = true
                     break
-                } catch (_: Exception) {
-                    // Try the next channel.
+                } catch (e: Exception) {
+                    detail = e.javaClass.simpleName + ": " + (e.message ?: "no message")
                 }
             }
-        }
-        if (launched) {
-            playDing()
+            if (!launched && detail.isBlank()) detail = "startActivity threw with no message"
         } else {
-            // Fallback: full-screen notification (today's behavior; works when
-            // DND is off and the OEM fires full-screen intents). Tap always works.
-            // The tap uses the assist channel — the one Muse actually implements.
-            val pending = PendingIntent.getActivity(
+            detail = "Display-over-other-apps not granted — direct launch skipped"
+        }
+        logWake(this, if (launched) "DIRECT" else "FSI_POSTED", detail)
+
+        if (!launched) {
+            // 4. Fallback: full-screen notification. Full-screen intent is the
+            // system's purpose-built lock-screen path; the tap goes through
+            // WakeTapReceiver so the wake log records TAP as well.
+            val fsPending = PendingIntent.getActivity(
                 this, 0, intents[0],
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val tapPending = PendingIntent.getBroadcast(
+                this, 1, Intent(this, WakeTapReceiver::class.java),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val notification = Notification.Builder(this, CHANNEL_WAKE)
@@ -223,24 +318,21 @@ class WakeService : Service() {
                 .setContentText("Opening your assistant…")
                 .setPriority(Notification.PRIORITY_HIGH)
                 .setCategory(Notification.CATEGORY_ALARM)
-                // Full-screen intent: pops Muse open even from the lock screen.
-                // (Apps targeting API 34+ need a Settings grant for this; we
-                // deliberately target 33 so the manifest permission suffices.)
-                .setFullScreenIntent(pending, true)
+                // Full-screen intent: pops the assistant open even from the lock screen.
+                // (We deliberately target API 33: the manifest permission suffices;
+                // no user-facing full-screen grant exists below Android 14.)
+                .setFullScreenIntent(fsPending, true)
                 // Tap fallback: if the full-screen intent doesn't fire, tapping
                 // the heads-up notification does the same thing.
-                .setContentIntent(pending)
+                .setContentIntent(tapPending)
                 .setAutoCancel(true)
                 .build()
             notificationManager.notify(NOTIF_WAKE_ID, notification)
         }
 
-        // Resume listening after a beat so the assistant session isn't cut off.
-        Handler(Looper.getMainLooper()).postDelayed({
-            try {
-                engine?.start()
-            } catch (_: Exception) { }
-        }, 1500)
+        // 5. Re-arm the mic: 4 s first (a cold-start Muse needs the headroom),
+        // then exponential backoff. Persistent failure → DEGRADED, never silent.
+        scheduleRearm()
     }
 
     /** Short confirmation beep the moment the wake word fires. */
@@ -250,7 +342,42 @@ class WakeService : Service() {
             tone.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
             Handler(Looper.getMainLooper()).postDelayed({ tone.release() }, 400)
         } catch (_: Exception) {
-            // Audio focus edge cases — the launch already happened; never crash here.
+            // Audio focus edge cases — never crash here.
+        }
+    }
+
+    // ---------- mic re-arm with backoff ----------
+
+    private var rearmAttempt = 0
+    // First retry at 4 s; then 1 s / 2 s / 4 s / 8 s between retries.
+    private val rearmSchedule = longArrayOf(4000, 1000, 2000, 4000, 8000)
+
+    private fun scheduleRearm() {
+        rearmAttempt = 0
+        setDegraded(false, 0)
+        Handler(Looper.getMainLooper()).postDelayed({ attemptRearm() }, rearmSchedule[0])
+    }
+
+    private fun attemptRearm() {
+        if (!listening || pausedForCall) return
+        try {
+            engine?.start()
+            rearmAttempt = 0
+            setDegraded(false, 0)
+            notificationManager.notify(NOTIF_LISTEN_ID, listeningNotification())
+        } catch (_: Exception) {
+            rearmAttempt++
+            if (rearmAttempt < rearmSchedule.size) {
+                setDegraded(true, rearmAttempt)
+                notificationManager.notify(NOTIF_LISTEN_ID, listeningNotification())
+                Handler(Looper.getMainLooper()).postDelayed(
+                    { attemptRearm() }, rearmSchedule[rearmAttempt]
+                )
+            } else {
+                // Out of retries: stay DEGRADED (visible), don't silently die.
+                setDegraded(true, rearmAttempt)
+                notificationManager.notify(NOTIF_LISTEN_ID, listeningNotification())
+            }
         }
     }
 
@@ -304,7 +431,7 @@ class WakeService : Service() {
         }
     }
 
-    private fun listeningNotification(paused: Boolean): Notification {
+    private fun listeningNotification(): Notification {
         val stopIntent = PendingIntent.getService(
             this, 0, Intent(this, WakeService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -314,10 +441,21 @@ class WakeService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val keyword = engine?.keywordName ?: "Hey Ron"
+        val degraded = isDegraded(this)
+        val retries = degradedRetries(this)
+        val (title, text) = when {
+            pausedForCall -> "Hey Ron paused (on call)" to "Resumes when the call ends"
+            degraded -> "Hey Ron degraded (mic retry $retries)" to
+                "Couldn't reclaim the mic — still trying. Open the app for details."
+            else -> "Hey Ron is listening" to "Say \"$keyword\" to open your assistant"
+        }
         return Notification.Builder(this, CHANNEL_LISTEN)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle(if (paused) "Hey Ron paused (on call)" else "Hey Ron is listening")
-            .setContentText(if (paused) "Resumes when the call ends" else "Say \"$keyword\" to open your assistant")
+            .setSmallIcon(
+                if (degraded) android.R.drawable.ic_dialog_alert
+                else android.R.drawable.ic_btn_speak_now
+            )
+            .setContentTitle(title)
+            .setContentText(text)
             .setContentIntent(openApp)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopIntent)
             .setOngoing(true)
@@ -335,5 +473,17 @@ class WakeService : Service() {
     private fun setEnabled(enabled: Boolean) {
         getSharedPreferences(PREFS, MODE_PRIVATE).edit()
             .putBoolean(KEY_ENABLED, enabled).apply()
+    }
+
+    private fun setPausedForCall(paused: Boolean) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean(KEY_PAUSED_FOR_CALL, paused).apply()
+    }
+
+    private fun setDegraded(degraded: Boolean, retries: Int) {
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+            .putBoolean(KEY_ENGINE_DEGRADED, degraded)
+            .putInt(KEY_ENGINE_RETRIES, retries)
+            .apply()
     }
 }
