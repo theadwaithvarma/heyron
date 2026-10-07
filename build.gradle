@@ -1,0 +1,77 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.adwaithvarma.heyron'
+    // compileSdk 34 (highest platform installed); targetSdk 33 DELIBERATELY.
+    // Android 14+ restricts full-screen intents for apps targeting API 34+ to a
+    // user-granted Settings permission. Targeting 33 keeps FSI working with just
+    // the manifest permission — critical for a sideloaded personal app.
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.adwaithvarma.heyron'
+        minSdk 26
+        targetSdk 33
+        // CI passes -PappVersionCode / -PappVersionName from the release tag
+        // (vX.Y -> code X*100+Y). Local builds fall back to the values below.
+        versionCode (project.findProperty('appVersionCode')?.toInteger() ?: 2)
+        versionName project.findProperty('appVersionName') ?: '2.0'
+
+        // Keep the APK lean: onnxruntime's AAR ships native libs for 4 ABIs
+        // (~33 MB per ABI); the M12 is arm64-v8a, so ship that only.
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+    }
+
+    // Release signing: keystore at ~/workspace/heyron/heyron-release.keystore,
+    // credentials in keystore.properties (same dir, chmod 600). Generated 2026-10-07.
+    // THIS KEY MUST NEVER CHANGE — Android refuses updates signed with another key.
+    def keystoreProps = new Properties()
+    def keystorePropsFile = rootProject.file('keystore.properties')
+    if (keystorePropsFile.exists()) {
+        keystorePropsFile.withInputStream { keystoreProps.load(it) }
+    }
+    signingConfigs {
+        release {
+            if (keystorePropsFile.exists()) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        debug {}
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    // The offline Maven repo doesn't carry lint-gradle; skip the hygiene gate.
+    lint {
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // Wake-word engine: openWakeWord ONNX pipeline (no API key, no account).
+    // onnxruntime-android is self-contained (native libs in the AAR).
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.30.0'
+}

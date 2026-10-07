@@ -1,0 +1,13 @@
+# Android / Gradle
+build/
+.gradle/
+local.properties
+*.iml
+.idea/
+
+# Signing — NEVER commit these. The release key lives outside the repo.
+# CI gets it via GitHub Secrets (KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS, KEY_PASSWORD).
+keystore.properties
+*.keystore
+*.jks
+*.p12

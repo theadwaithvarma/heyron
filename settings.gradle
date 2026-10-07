@@ -1,0 +1,25 @@
+// Dual-mode repositories: on Ron's build machine the offline local Maven repo
+// (/home/hatch/workspace/local-maven-repo) is used; everywhere else (e.g. GitHub
+// Actions) it falls through to the public repos.
+pluginManagement {
+    repositories {
+        if (new File("/home/hatch/workspace/local-maven-repo").exists()) {
+            maven { url = uri("/home/hatch/workspace/local-maven-repo") }
+        }
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        if (new File("/home/hatch/workspace/local-maven-repo").exists()) {
+            maven { url = uri("/home/hatch/workspace/local-maven-repo") }
+        }
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "HeyRon"
+include(":app")
