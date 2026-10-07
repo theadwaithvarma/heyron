@@ -5,8 +5,11 @@ import android.app.Activity
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import android.view.View
 import android.widget.Button
 import android.widget.SeekBar
 import android.widget.TextView
@@ -23,6 +26,8 @@ class MainActivity : Activity() {
     private lateinit var toggleButton: Button
     private lateinit var checkModel: TextView
     private lateinit var checkNotif: TextView
+    private lateinit var checkOverlay: TextView
+    private lateinit var overlayButton: Button
     private lateinit var thresholdLabel: TextView
     private lateinit var thresholdSeek: SeekBar
 
@@ -47,6 +52,18 @@ class MainActivity : Activity() {
         toggleButton = findViewById(R.id.toggleButton)
         checkModel = findViewById(R.id.checkModel)
         checkNotif = findViewById(R.id.checkNotif)
+        checkOverlay = findViewById(R.id.checkOverlay)
+        overlayButton = findViewById(R.id.overlayButton)
+        overlayButton.setOnClickListener {
+            // SYSTEM_ALERT_WINDOW can't be requested via requestPermissions();
+            // it needs the special Settings screen.
+            startActivity(
+                Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        }
         thresholdLabel = findViewById(R.id.thresholdLabel)
         thresholdSeek = findViewById(R.id.thresholdSeek)
 
@@ -138,5 +155,14 @@ class MainActivity : Activity() {
 
         val notifOk = getSystemService(NotificationManager::class.java).areNotificationsEnabled()
         checkNotif.text = if (notifOk) "✓ Notifications: allowed" else "✗ Notifications: blocked (enable in Settings)"
+
+        // v2.1: overlay grant = instant, DND-proof assistant launch on wake.
+        val overlayOk = Settings.canDrawOverlays(this)
+        checkOverlay.text = if (overlayOk) {
+            "✓ Display over other apps: granted — wake word opens Muse instantly"
+        } else {
+            "✗ Display over other apps: not granted — grant it for instant wake (no tap)"
+        }
+        overlayButton.visibility = if (overlayOk) View.GONE else View.VISIBLE
     }
 }

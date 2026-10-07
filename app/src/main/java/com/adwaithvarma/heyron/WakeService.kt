@@ -10,7 +10,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.provider.Settings
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
 
@@ -20,9 +23,10 @@ import android.telephony.TelephonyManager
  * - Runs as a foreground service (type: microphone) with a persistent notification.
  * - openWakeWord does on-device keyword spotting (melspectrogram + speech-embedding
  *   + wake-word ONNX models); no audio ever leaves the phone, no API key needed.
- * - On detection it posts a HIGH-priority notification with a full-screen intent
- *   that fires ACTION_VOICE_COMMAND -> opens the default assistant (Muse on
- *   Adwaith's phone) with voice input already toggled. Fully hands-free.
+ * - On detection (v2.1): if "Display over other apps" is granted, the service
+ *   launches ACTION_VOICE_COMMAND directly (instant, DND-proof); otherwise it
+ *   posts a HIGH-priority notification with a full-screen intent. Either way
+ *   the default assistant (Muse) opens with voice input already toggled.
  * - Pauses while a phone call is active (a second mic holder can glitch call audio).
  */
 class WakeService : Service() {
@@ -176,31 +180,51 @@ class WakeService : Service() {
 
         val voiceIntent = Intent(Intent.ACTION_VOICE_COMMAND)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        val pending = PendingIntent.getActivity(
-            this, 0, voiceIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val notification = Notification.Builder(this, CHANNEL_WAKE)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setContentTitle("Hey Ron heard you")
-            .setContentText("Opening your assistant…")
-            .setPriority(Notification.PRIORITY_HIGH)
-            .setCategory(Notification.CATEGORY_ALARM)
-            // Full-screen intent: pops Muse open even from the lock screen.
-            // (Apps targeting API 34+ need a Settings grant for this; we
-            // deliberately target 33 so the manifest permission suffices.)
-            .setFullScreenIntent(pending, true)
-            // Tap fallback: if the full-screen intent doesn't fire, tapping
-            // the heads-up notification does the same thing.
-            .setContentIntent(pending)
-            .setAutoCancel(true)
-            .build()
-        notificationManager.notify(NOTIF_WAKE_ID, notification)
+
+        // v2.1 primary path: SYSTEM_ALERT_WINDOW ("Display over other apps")
+        // exempts the service from background-activity-start restrictions, so
+        // the assistant opens instantly and directly — no full-screen intent
+        // for DND or Samsung's heads-up demotion to swallow.
+        var launched = false
+        if (Settings.canDrawOverlays(this)) {
+            try {
+                startActivity(voiceIntent)
+                launched = true
+            } catch (_: Exception) {
+                launched = false
+            }
+        }
+        if (!launched) {
+            // Fallback: full-screen notification (today's behavior; works when
+            // DND is off and the OEM fires full-screen intents). Tap always works.
+            val pending = PendingIntent.getActivity(
+                this, 0, voiceIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val notification = Notification.Builder(this, CHANNEL_WAKE)
+                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                .setContentTitle("Hey Ron heard you")
+                .setContentText("Opening your assistant…")
+                .setPriority(Notification.PRIORITY_HIGH)
+                .setCategory(Notification.CATEGORY_ALARM)
+                // Full-screen intent: pops Muse open even from the lock screen.
+                // (Apps targeting API 34+ need a Settings grant for this; we
+                // deliberately target 33 so the manifest permission suffices.)
+                .setFullScreenIntent(pending, true)
+                // Tap fallback: if the full-screen intent doesn't fire, tapping
+                // the heads-up notification does the same thing.
+                .setContentIntent(pending)
+                .setAutoCancel(true)
+                .build()
+            notificationManager.notify(NOTIF_WAKE_ID, notification)
+        }
 
         // Resume listening after a beat so the assistant session isn't cut off.
-        try {
-            engine?.start()
-        } catch (_: Exception) { }
+        Handler(Looper.getMainLooper()).postDelayed({
+            try {
+                engine?.start()
+            } catch (_: Exception) { }
+        }, 1500)
     }
 
     // ---------- wake-word model ----------
