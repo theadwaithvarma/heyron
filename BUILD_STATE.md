@@ -190,3 +190,29 @@ sideloaded personal app that must pop Muse open from the lock screen.
   fallback, on both the direct-launch path and the notification tap
   PendingIntent. (Matches kangrio/assistant's per-assistant channel split.)
 - Version: 2.3, versionCode 203.
+
+## v2.4 (2026-10-07) — the designed version
+- Built from ALGORITHM_VNEXT.md (deep research: Muse APK teardown
+  com.facebook.aura/HatchVoiceInteractionService; API-33 mechanisms; Samsung
+  One UI 5.1 battery behavior). No more speculative versions.
+- onWakeWord() pipeline: engine.stop() sync → ding immediately → direct
+  startActivity(ASSIST, then VOICE_COMMAND) if overlay granted → else FSI
+  notification (tap now routes through new WakeTapReceiver so the wake log
+  records TAP). 3 s debounce after any launch attempt.
+- Mic re-arm at 4 s (was 1.5 s) with exponential backoff 1/2/4/8 s; persistent
+  failure marks the engine DEGRADED (persistent notification + checklist) instead
+  of dying silently. resumeAfterCall() reuses the same backoff.
+- WakeService companion: logWake()/lastWakeSummary() (timestamp, path
+  DIRECT/FSI_POSTED/TAP, defeat detail); defaultAssistantLabel() reads
+  Settings.Secure "assistant" key; isWakeChannelHigh(); degraded/paused prefs.
+- MainActivity: 7-row diagnostics checklist — default assistant (+ settings
+  button), overlay, battery (+ Samsung never-sleeping path note, shown only on
+  Samsung), notifications (+ wake-channel importance check), DND state, last
+  wake log, engine state. Layout wrapped in ScrollView.
+- New WakeTapReceiver (manifest-registered, exported=false).
+- Version: 2.4, versionCode 204. Signed with existing release key (verified via
+  apksigner, CN=Adwaith Varma). SHA-256:
+  a55208e06b3490225febf664402c267968237df0cd67d7f97616cf18f347126e
+- Local build notes: no gradlew wrapper in repo — use
+  ~/workspace/gradle-8.10.2/bin/gradle with JAVA_HOME=~/workspace/jdk17/jdk-17.0.20.1+1
+  and GRADLE_OPTS="-Djava.net.preferIPv4Stack=true".
