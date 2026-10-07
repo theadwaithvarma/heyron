@@ -144,3 +144,22 @@ sideloaded personal app that must pop Muse open from the lock screen.
    memory leaks otherwise).
 5. Porcupine 4.0.2 was removed in v2.0 (company-email signup wall). Its old notes
    are superseded — do not re-add it.
+
+## v2.1 (2026-10-07, 23:00 IST) — instant, DND-proof wake launch
+- Problem: on wake, the full-screen intent did not auto-launch while the phone
+  was in use (Android demotes FSI to heads-up when interactive; DND suppresses
+  it too). Adwaith had to tap the notification.
+- Fix: request SYSTEM_ALERT_WINDOW ("Display over other apps"). Holding it
+  exempts the service from background-activity-start restrictions, so
+  onWakeWord() now calls startActivity(ACTION_VOICE_COMMAND) directly when
+  Settings.canDrawOverlays() is true (try/catch -> falls back to the FSI
+  notification). No notification is posted on the direct path.
+- Engine restart after wake is now delayed 1.5s via main-looper Handler (was
+  immediate) so the assistant session isn't cut off.
+- MainActivity: setup checklist gained a "Display over other apps" row + a
+  grant button deep-linking to Settings.ACTION_MANAGE_OVERLAY_PERMISSION
+  (SAW can't be requested via requestPermissions()).
+- Samsung Routines considered and rejected: its "Notification received"
+  trigger exists, but THEN can only open an app (Muse's main screen, not voice
+  mode). The overlay path fires the real voice intent with zero manual setup.
+- Version: 2.1, versionCode 201 (CI maps tag vX.Y -> X*100+Y).
