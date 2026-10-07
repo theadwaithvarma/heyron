@@ -179,3 +179,14 @@ sideloaded personal app that must pop Muse open from the lock screen.
     package from their own onboarding picker. Skipped — the implicit intent
     already resolves to the user-set default.
 - Version: 2.2, versionCode 202.
+
+## v2.3 (2026-10-07, 23:30 IST) — the actual bug: wrong intent channel
+- Adwaith: wake word showed a picker with only Google and Perplexity, no Muse.
+  Root cause: Muse does NOT handle ACTION_VOICE_COMMAND (that's the legacy
+  headset voice channel; only Google/Perplexity listen on it). Muse implements
+  the assist entry point (ACTION_ASSIST, long-press-home), which opens it
+  already listening. We were knocking on the wrong door — not a weak app.
+- onWakeWord() now tries ACTION_ASSIST first, then ACTION_VOICE_COMMAND as
+  fallback, on both the direct-launch path and the notification tap
+  PendingIntent. (Matches kangrio/assistant's per-assistant channel split.)
+- Version: 2.3, versionCode 203.
