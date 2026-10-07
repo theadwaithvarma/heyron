@@ -9,6 +9,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -178,6 +180,10 @@ class WakeService : Service() {
             engine?.stop()
         } catch (_: Exception) { }
 
+        // Implicit intent -> the system's default digital assistant (Muse on
+        // Adwaith's phone). The default must be set; otherwise Android shows a
+        // picker. (An explicit setPackage() would need a per-app picker UI in
+        // Hey Ron itself — skipped; the OS default already resolves correctly.)
         val voiceIntent = Intent(Intent.ACTION_VOICE_COMMAND)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
 
@@ -194,7 +200,9 @@ class WakeService : Service() {
                 launched = false
             }
         }
-        if (!launched) {
+        if (launched) {
+            playDing()
+        } else {
             // Fallback: full-screen notification (today's behavior; works when
             // DND is off and the OEM fires full-screen intents). Tap always works.
             val pending = PendingIntent.getActivity(
@@ -225,6 +233,17 @@ class WakeService : Service() {
                 engine?.start()
             } catch (_: Exception) { }
         }, 1500)
+    }
+
+    /** Short confirmation beep the moment the wake word fires. */
+    private fun playDing() {
+        try {
+            val tone = ToneGenerator(AudioManager.STREAM_MUSIC, 80)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP, 150)
+            Handler(Looper.getMainLooper()).postDelayed({ tone.release() }, 400)
+        } catch (_: Exception) {
+            // Audio focus edge cases — the launch already happened; never crash here.
+        }
     }
 
     // ---------- wake-word model ----------

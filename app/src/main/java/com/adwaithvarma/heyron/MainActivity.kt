@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.view.View
 import android.widget.Button
@@ -28,6 +29,8 @@ class MainActivity : Activity() {
     private lateinit var checkNotif: TextView
     private lateinit var checkOverlay: TextView
     private lateinit var overlayButton: Button
+    private lateinit var checkBattery: TextView
+    private lateinit var batteryButton: Button
     private lateinit var thresholdLabel: TextView
     private lateinit var thresholdSeek: SeekBar
 
@@ -60,6 +63,17 @@ class MainActivity : Activity() {
             startActivity(
                 Intent(
                     Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        }
+        checkBattery = findViewById(R.id.checkBattery)
+        batteryButton = findViewById(R.id.batteryButton)
+        batteryButton.setOnClickListener {
+            // Pops the system "let app always run in background?" dialog.
+            startActivity(
+                Intent(
+                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
                     Uri.parse("package:$packageName")
                 )
             )
@@ -164,5 +178,15 @@ class MainActivity : Activity() {
             "✗ Display over other apps: not granted — grant it for instant wake (no tap)"
         }
         overlayButton.visibility = if (overlayOk) View.GONE else View.VISIBLE
+
+        // v2.2: Samsung dozes background mic services unless unrestricted.
+        val powerManager = getSystemService(PowerManager::class.java)
+        val batteryOk = powerManager.isIgnoringBatteryOptimizations(packageName)
+        checkBattery.text = if (batteryOk) {
+            "✓ Battery: unrestricted — mic stays alive in background"
+        } else {
+            "✗ Battery: optimized — Samsung may kill the listener; set Unrestricted"
+        }
+        batteryButton.visibility = if (batteryOk) View.GONE else View.VISIBLE
     }
 }
